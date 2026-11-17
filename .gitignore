@@ -1,0 +1,20 @@
+# secrets and personal state - never share
+config.json
+client_secret.json
+google_token.json
+meet_profile/
+alerted.json
+watcher.log
+meet_peek.png
+*.old
+*.bak*
+
+# environment
+.venv/
+__pycache__/
+
+# not part of the project
+*.xlsx
+~$*
+com.*.meeting-join-alert.plist
+.DS_Store

@@ -1,0 +1,14 @@
+{
+  "my_names": ["Your Name"],
+  "calendar_ids": ["primary"],
+  "poll_seconds": 30,
+  "minutes_before_start": 10,
+  "watch_minutes_after_start": 5,
+  "reminder_seconds_before": 60,
+  "sound": "Glass",
+  "style": "both",
+  "alert_timeout_seconds": 300,
+  "google_client_secret": "client_secret.json",
+  "meet_profile_dir": "meet_profile",
+  "zoom": null
+}
