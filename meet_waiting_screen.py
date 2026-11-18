@@ -83,14 +83,19 @@ def chrome_version() -> str:
         return "140"
 
 
-def login(profile_dir: Path) -> None:
-    """Open a normal (not automated) Chrome window on the dedicated profile so you can sign in to Google."""
+def open_sign_in_window(profile_dir: Path) -> None:
+    """Open a normal (not automated) Chrome window on the dedicated profile, and wait until it's quit.
+    The headless browser must not be running on the same profile at the time."""
     profile_dir.mkdir(mode=0o700, exist_ok=True)
     os.chmod(profile_dir, 0o700)
+    subprocess.run([CHROME, f"--user-data-dir={profile_dir}", *COMMON_ARGS, "https://accounts.google.com/"])
+
+
+def login(profile_dir: Path) -> None:
     print("A separate Chrome window will open. Sign in to your Google account there,\n"
           "open https://meet.google.com once to check you're signed in, then quit that Chrome with Cmd-Q.")
-    subprocess.run([CHROME, f"--user-data-dir={profile_dir}", *COMMON_ARGS, "https://accounts.google.com/"])
-    print(f"Saved sign-in to {profile_dir}. Restart the watcher to pick it up.")
+    open_sign_in_window(profile_dir)
+    print(f"Saved sign-in to {profile_dir}. A running watcher picks it up on its next Meet meeting.")
 
 
 class WaitingScreen:

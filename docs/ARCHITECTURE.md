@@ -46,7 +46,8 @@ There is no server, database or UI. State lives in a few small files next to the
 `main()` runs `Watcher.tick()` every `poll_seconds` (default 30). A failing tick is logged and the
 loop carries on; network blips and Google/Zoom 5xx/429 errors are logged as one-line warnings
 (`transient_error()`), anything else with a full traceback. If the gap between ticks is much longer
-than expected (the Mac slept) it logs a warning.
+than expected (the Mac slept) it logs a warning. Sign-in problems never stop the loop: see
+[Sign-ins](#sign-ins).
 
 Each tick:
 
@@ -103,7 +104,7 @@ recognises:
 | `empty` | "No one else is here" | Keep watching |
 | `me_elsewhere` | "You're in this call on another device" | Done, no alert |
 | `blocked` | "You can't join this video call", meeting ended… | Log and stop watching |
-| `signed_out` | Redirected to accounts.google.com | Log; re-run `--meet-login` |
+| `signed_out` | Redirected to accounts.google.com | `MeetSignIn.signed_out()`: pause and ask to sign in ([Sign-ins](#sign-ins)) |
 | `no_info` | Nothing recognisable after 45 s | Log once, keep watching |
 
 Chrome only runs while at least one tab is open; it's shut down when the last watched Meet ends.
@@ -162,11 +163,33 @@ unreachable push server never delays polling or the Mac alert. One-shot commands
 - Log lines name a target by `push_label()`: the Gotify host, or the first 6 characters of the ntfy
   topic, since on ntfy.sh the topic works like a password.
 
+## Sign-ins
+
+Two sign-ins can expire: calendar access and the waiting-screen Chrome profile. Each is a `SignIn`
+subclass with the same behaviour: `pause()` logs one warning, sends one phone push, and shows a Mac
+alert with **Sign in** / **Later** (repeated every 2 hours while still broken). `resume()` sends a
+"working again" banner. The alert and the sign-in itself run in a thread, so polling carries on.
+
+- **`CalendarSignIn`** owns the calendar session. Each tick, `session()` checks `google_token.json`'s
+  mtime and reloads it when it changes. That makes the token file the hand-off: the **Sign in**
+  button (`google_sign_in()`, browser OAuth with a 10-minute timeout) and `--auth` in a terminal both
+  just write it, and the next poll resumes. A non-retryable `RefreshError`, at load or mid-poll,
+  pauses. Network errors and retryable refresh errors propagate as normal transient errors, so a
+  network blip isn't mistaken for being signed out. Tokens are written atomically (write, then
+  rename) so a half-written file is never read.
+- **`MeetSignIn`** watches the Chrome profile. When there are no cookies, or Meet redirects to
+  accounts.google.com, it shuts the headless Chrome (freeing the profile) and pauses. Meet meetings
+  stay pending rather than being marked done. **Sign in** opens the visible Chrome
+  (`open_sign_in_window()`) and waits for it to quit; the next poll then resumes and re-opens tabs for
+  meetings still in the window. Playwright is only touched from the poll thread.
+- **Startup:** the service never exits for a missing or dead token; it starts paused. `--once` and
+  `--tomorrow` still exit with a message, and `--auth` always runs a fresh sign-in.
+
 ## State and files on disk
 
 | File | Written by | Purpose |
 | --- | --- | --- |
-| `google_token.json` | `--auth`, every start | Your OAuth refresh token (mode 600). |
+| `google_token.json` | `--auth`, the **Sign in** button | Your OAuth refresh token (mode 600). The watcher reloads it when it changes. |
 | `alerted.json` | `announce()`, `remind()` | Meeting keys already alerted on, with timestamps, so a restart doesn't repeat alerts. Entries older than 2 days are dropped on load. |
 | `meet_profile/` | `--meet-login`, Chrome | Signed-in Chrome profile for waiting screens (mode 700). |
 | `watcher.log` | launchd (stdout/stderr) | The log. It is never rotated; truncate it if it gets large. |

@@ -60,7 +60,11 @@ You do this once. If your company already has a client for this tool, ask for it
 1. Open <https://console.cloud.google.com> and create a project, or reuse one.
 2. **APIs & Services → Library**: enable **Google Calendar API**.
 3. **APIs & Services → OAuth consent screen**:
-   - User type **Internal** (on Workspace). On a personal account choose *External* and add yourself as a test user.
+   - User type **Internal** (on Workspace). On a personal account choose *External*, then
+     **Publish app** (status *In production*). Sign-in shows a one-time "Google hasn't verified this
+     app" screen: click *Advanced → Continue*.
+   - **Don't leave an External app in *Testing*:** Google then expires the sign-in every 7 days. The
+     watcher copes (see [Staying signed in](#staying-signed-in)), but you'd be asked to sign in weekly.
    - Add the scope `.../auth/calendar.readonly`.
 4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
    - Application type **Desktop app**.
@@ -122,7 +126,8 @@ A separate Chrome window opens. Sign in to Google, open <https://meet.google.com
 .venv/bin/python meeting_join_alert.py --meet-peek https://meet.google.com/abc-defg-hij
 ```
 
-Then restart the service (`./install.sh`). Without this step Meet meetings can't be watched.
+A running watcher picks up the sign-in at its next Meet meeting; no restart needed. Without this
+step Meet meetings can't be watched.
 
 > **Security:** the sign-in is stored in `meet_profile/` with **unencrypted** cookies. Treat that
 > folder like a password, and delete it to sign out.
@@ -174,6 +179,24 @@ To be alerted on the phone only when you're away from the Mac, also set
 
 ---
 
+## Staying signed in
+
+The watcher depends on two Google sign-ins: calendar access (`google_token.json`, from `--auth`) and
+the waiting-screen Chrome (`meet_profile/`, from `--meet-login`). Either can expire or be revoked.
+When one does, the watcher doesn't crash or go quiet. It:
+
+1. logs one warning and shows an alert on the Mac, *"Meeting alerts paused: … sign-in has expired"*,
+   with a **Sign in** button, and sends one phone notification if you've set up `push`;
+2. on **Sign in**: for calendar, opens a browser tab where you pick your account; for Meet, opens the
+   separate Chrome window (sign in, then quit it with Cmd-Q);
+3. carries on by itself once you've signed in, and shows *"… is working again"*.
+
+If you click **Later**, it asks again every 2 hours. Running `--auth` or `--meet-login` in a terminal
+works too, and also needs no restart. While the calendar sign-in is broken there are no alerts at all.
+While the Meet one is broken, Zoom and Teams alerts still work.
+
+The **Sign in** button needs `client_secret.json` in this folder. Keep it there.
+
 ## Day-to-day commands
 
 | Task | Command |
@@ -185,6 +208,7 @@ To be alerted on the phone only when you're away from the Mac, also set
 | Is it running? | `launchctl print gui/$(id -u)/com.$(whoami).meeting-join-alert \| grep state` |
 | Preview tomorrow | `.venv/bin/python meeting_join_alert.py --tomorrow` |
 | Test phone notifications | `.venv/bin/python meeting_join_alert.py --test-push` |
+| Sign in to Google again | Click **Sign in** on the alert, or `.venv/bin/python meeting_join_alert.py --auth` |
 
 ## Updating
 

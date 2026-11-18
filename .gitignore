@@ -18,3 +18,4 @@ __pycache__/
 ~$*
 com.*.meeting-join-alert.plist
 .DS_Store
+google_token.tmp

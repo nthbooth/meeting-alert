@@ -7,7 +7,8 @@ A small macOS background tool that watches your Google Calendar and pops up an a
 - **one minute before a Zoom or Teams meeting starts**, for meetings where there's no way to see
   who's in them.
 
-It stops alerting for a meeting once you're in it, and alerts only once per meeting. It can also send
+It stops alerting for a meeting once you're in it, and alerts only once per meeting. If a Google
+sign-in expires it tells you (with a **Sign in** button) rather than going quiet. It can also send
 each alert to your phone via **ntfy** or **Gotify** (install step 8).
 
 ## Quick start

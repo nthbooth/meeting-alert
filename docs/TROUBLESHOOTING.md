@@ -26,11 +26,12 @@ And to see what each of tomorrow's meetings will get:
 
 | Message | Meaning / fix |
 | --- | --- |
-| `No valid Google token - run --auth` | Run `.venv/bin/python meeting_join_alert.py --auth` in a terminal, then `./install.sh`. |
-| `invalid_grant` / `RefreshError` at start-up | Your Google sign-in was revoked or expired. Delete `google_token.json` and run `--auth` again. Needs `client_secret.json`. |
+| `Google Calendar sign-in has expired - no meeting alerts of any kind until you sign in again` | Click **Sign in** on the alert, or run `.venv/bin/python meeting_join_alert.py --auth`. No restart needed. See [INSTALL.md](INSTALL.md#staying-signed-in). If this happens every 7 days, your OAuth app is in *Testing*: publish it (INSTALL step 3). |
+| `Google Calendar sign-in is missing` | No `google_token.json` yet. Same fix. |
+| `Google Calendar sign-in didn't complete: …` | The browser sign-in was cancelled or timed out (10 minutes). You'll be asked again on the next poll. |
+| `Google sign-in missing or expired - run … --auth` (from `--once` / `--tomorrow`) | Same fix; those commands need a working sign-in. |
 | `poll skipped: network unavailable…` / `timed out…` / `503…` | A temporary network or server problem. It retries on the next poll; ignore unless it keeps happening. |
-| `The Meet browser isn't signed in` / `waiting screen not set up` | Run `--meet-login`, sign in, Cmd-Q that Chrome, then `./install.sh`. |
-| `Can't watch '…': the Meet browser is signed out` | The waiting-screen session expired. Run `--meet-login` again. |
+| `Meet waiting-screen sign-in is missing` / `has expired` | Click **Sign in** on the alert (or run `--meet-login`), sign in in the Chrome window, then Cmd-Q it. Meetings that are still on get watched once you're back. |
 | `Waiting screen for '…' doesn't show who's in the call (yet). Page says: …` | Usually just means nobody is there yet; it keeps watching. If it happens for meetings you know are busy, Google may have changed the page. Run `--meet-peek <url>` and compare the text with the patterns at the top of `meet_waiting_screen.py`. |
 | `Can't watch '…' (meet): Meet says 'you can't join this video call'` | The signed-in account isn't allowed into that meeting (restricted to an org, or you weren't invited with that account). |
 | `Can't watch '…' (zoom): not a meeting on your Zoom account` | Expected for other people's Zoom meetings. You still get the 1-minute reminder. |
@@ -68,6 +69,9 @@ the waiting screen, and quits when the last one ends.
 target. If it says `OK` but nothing shows up: for ntfy, check the app is subscribed to exactly that
 topic on the same server; for Gotify, check the app is logged in to the server and that Android isn't
 battery-optimising it. Phone Focus / Do Not Disturb modes can also hold them back.
+
+**The Sign in alert says `client_secret.json is missing`.** Put the OAuth client file back in this
+folder (INSTALL step 3), then click Sign in on the next alert or run `--auth`.
 
 **Gotify on iPhone.** Gotify has no official iOS app. Use ntfy on iPhone.
 
