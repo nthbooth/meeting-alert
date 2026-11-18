@@ -37,6 +37,10 @@ And to see what each of tomorrow's meetings will get:
 | `Can't watch '…' (zoom): no Zoom credentials in config` | Expected if `zoom` is `null`. You still get the 1-minute reminder. |
 | `Zoom Dashboard API unavailable (403)` | Your Zoom plan or app scopes don't include live participants. You'll get "Zoom meeting started" instead of names. |
 | `Can't watch '…' (teams): no Teams API - start reminder only` | Expected for Teams. |
+| `Ignoring push target N: …` | That entry in `push` has an unknown `service` or a missing `topic` / `server` / `token`. The others still work. |
+| `Phone push to … failed: 401 Unauthorized …` / `403 Forbidden` | Wrong token. For Gotify, use an *application* token, not a client token. For ntfy, the topic is protected: check `token` or `user`/`password`. |
+| `Phone push to … failed: network unavailable…` / `timed out…` | The push server couldn't be reached. The Mac alert still appeared. Check the `server` URL. |
+| `Phone push skipped: Mac in use (idle …)` | Expected with `push_only_when_idle_seconds`: you were using the Mac. |
 
 ## Specific problems
 
@@ -59,6 +63,13 @@ the built-in fallback can't open links. The big centred alert's Join button work
 
 **Headless Chrome uses CPU / I see a Chrome process.** It only runs while a Meet is being watched via
 the waiting screen, and quits when the last one ends.
+
+**Phone notifications don't arrive.** Run `--test-push`: it prints `OK` or the error for each
+target. If it says `OK` but nothing shows up: for ntfy, check the app is subscribed to exactly that
+topic on the same server; for Gotify, check the app is logged in to the server and that Android isn't
+battery-optimising it. Phone Focus / Do Not Disturb modes can also hold them back.
+
+**Gotify on iPhone.** Gotify has no official iOS app. Use ntfy on iPhone.
 
 **`watcher.log` is huge.** It's never rotated. It's safe to empty it: `: > watcher.log`.
 

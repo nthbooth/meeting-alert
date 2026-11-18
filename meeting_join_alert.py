@@ -11,6 +11,7 @@ Every `poll_seconds` it:
 Usage:
   meeting_join_alert.py --auth         one-off Google sign-in (run in a terminal)
   meeting_join_alert.py --test-notify  check notifications work
+  meeting_join_alert.py --test-push    check phone notifications (ntfy / Gotify) work
   meeting_join_alert.py --once         one poll with verbose output
   meeting_join_alert.py --tomorrow     list tomorrow's meetings and whether each can be watched
   meeting_join_alert.py --meet-login   sign in to Google in the browser used for Meet waiting screens
@@ -27,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -68,6 +70,10 @@ DEFAULTS = {
     # Zoom and Teams meetings get a "starts in 1 minute" alert, since we can't see who's in them.
     # Seconds before the start to show it (0 = off).
     "reminder_seconds_before": 60,
+    # Phone notifications: a list of {"service": "ntfy" | "gotify", ...} targets. Empty = off.
+    "push": [],
+    # Only send phone notifications when the Mac has been idle this many seconds (0 = always send).
+    "push_only_when_idle_seconds": 0,
 }
 
 log = logging.getLogger("meeting-join-alert")
@@ -80,6 +86,7 @@ def load_config() -> dict:
     if CONFIG_PATH.exists():
         cfg.update(json.loads(CONFIG_PATH.read_text()))
     cfg["my_names"] = [n.strip().lower() for n in cfg["my_names"] if n.strip()]
+    cfg["push"] = valid_push_targets(cfg.get("push") or [])
     return cfg
 
 
@@ -230,6 +237,11 @@ def notify(title: str, message: str, url: str | None, cfg: dict) -> None:
         show_banner(title, message, url, cfg["sound"])
     if style in ("alert", "both"):
         show_alert(title, message, url, cfg, play_sound=(style == "alert"))
+    if cfg.get("push"):
+        # In a thread so a slow push server never holds up polling or the Mac alert.
+        th = threading.Thread(target=push_if_away, args=(title, message, url, cfg), daemon=True)
+        th.start()
+        PUSH_THREADS.append(th)
 
 
 def show_alert(title: str, message: str, url: str | None, cfg: dict, play_sound: bool = True) -> None:
@@ -267,6 +279,137 @@ def show_banner(title: str, message: str, url: str | None, sound: str) -> None:
         "-e", "end run",
     ]
     subprocess.run(["osascript", *script, title, message, sound], check=False)
+
+
+# ---------------------------------------------------------------- phone notifications
+
+PUSH_REQUIRED = {"ntfy": ("topic",), "gotify": ("server", "token")}
+PUSH_TIMEOUT = 10
+PUSH_THREADS: list[threading.Thread] = []
+
+
+def wait_for_pushes() -> None:
+    """Let in-flight pushes finish before a one-shot command exits."""
+    for th in PUSH_THREADS:
+        th.join(timeout=PUSH_TIMEOUT + 5)
+    PUSH_THREADS.clear()
+
+
+def valid_push_targets(targets: list) -> list[dict]:
+    """The usable entries of the `push` setting. Bad ones are skipped with a warning rather than crashing."""
+    if not isinstance(targets, list):
+        log.warning("Ignoring push setting: it must be a list of targets")
+        return []
+    good = []
+    for i, t in enumerate(targets):
+        service = t.get("service") if isinstance(t, dict) else None
+        if service not in PUSH_REQUIRED:
+            log.warning("Ignoring push target %d: service must be one of %s", i + 1, ", ".join(PUSH_REQUIRED))
+            continue
+        missing = [k for k in PUSH_REQUIRED[service] if not t.get(k)]
+        if missing:
+            log.warning("Ignoring %s push target %d: missing %s", service, i + 1, ", ".join(missing))
+            continue
+        good.append(t)
+    return good
+
+
+def push_label(t: dict) -> str:
+    """Short name for a target in logs. Never includes the token."""
+    if t["service"] == "ntfy":
+        topic = t["topic"]
+        return f"ntfy ({topic[:6]}…)" if len(topic) > 6 else f"ntfy ({topic})"
+    return f"gotify ({requests.utils.urlparse(t['server']).hostname})"
+
+
+def mac_idle_seconds() -> float:
+    """Seconds since the last keyboard or mouse input. Treated as idle if it can't be read."""
+    try:
+        out = subprocess.run(["ioreg", "-c", "IOHIDSystem"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return float("inf")
+    m = re.search(r'"HIDIdleTime" = (\d+)', out)
+    return int(m.group(1)) / 1e9 if m else float("inf")
+
+
+def push_if_away(title: str, message: str, url: str | None, cfg: dict) -> None:
+    need = int(cfg.get("push_only_when_idle_seconds") or 0)
+    if need > 0:
+        idle = mac_idle_seconds()
+        if idle < need:
+            log.info("Phone push skipped: Mac in use (idle %ds < %ds)", idle, need)
+            return
+    send_push(title, message, url, cfg)
+
+
+def send_push(title: str, message: str, url: str | None, cfg: dict) -> list[tuple[str, str | None]]:
+    """Send to every push target. Returns (target, error or None) for each; failures are logged, never raised."""
+    results = []
+    for t in cfg.get("push") or []:
+        label = push_label(t)
+        try:
+            (push_ntfy if t["service"] == "ntfy" else push_gotify)(t, title, message, url)
+            log.info("Phone push sent to %s", label)
+            results.append((label, None))
+        except requests.RequestException as e:
+            err = push_error(e)
+            log.warning("Phone push to %s failed: %s", label, err)
+            results.append((label, err))
+    return results
+
+
+def push_error(e: requests.RequestException) -> str:
+    if isinstance(e, requests.HTTPError) and e.response is not None:
+        detail = ""
+        try:
+            body = e.response.json()
+            detail = body.get("errorDescription") or body.get("error") or ""
+        except ValueError:
+            pass
+        reason = f"{e.response.status_code} {e.response.reason}"
+        return f"{reason} ({detail})" if detail and detail != e.response.reason else reason
+    return transient_error(e) or type(e).__name__
+
+
+def push_ntfy(t: dict, title: str, message: str, url: str | None) -> None:
+    # JSON publishing to the server root, not the Title/Click headers: headers can't carry non-ASCII names.
+    body = {"topic": t["topic"], "title": title, "message": message, "priority": int(t.get("priority", 4))}
+    if t.get("tags"):
+        body["tags"] = t["tags"]
+    if url:
+        body["click"] = url
+        body["actions"] = [{"action": "view", "label": "Join", "url": url, "clear": True}]
+    headers, auth = {}, None
+    if t.get("token"):
+        headers["Authorization"] = f"Bearer {t['token']}"
+    elif t.get("user"):
+        auth = (t["user"], t.get("password") or "")
+    server = (t.get("server") or "https://ntfy.sh").rstrip("/")
+    r = requests.post(server, json=body, headers=headers, auth=auth, timeout=PUSH_TIMEOUT)
+    r.raise_for_status()
+
+
+def push_gotify(t: dict, title: str, message: str, url: str | None) -> None:
+    body = {"title": title, "message": message, "priority": int(t.get("priority", 8)),
+            "extras": {"client::display": {"contentType": "text/plain"}}}
+    if url:
+        body["message"] = f"{message}\n{url}"
+        body["extras"]["client::notification"] = {"click": {"url": url}}
+    # Token in a header, never the URL, so it can't end up in logs.
+    r = requests.post(f"{t['server'].rstrip('/')}/message", json=body,
+                      headers={"X-Gotify-Key": t["token"]}, timeout=PUSH_TIMEOUT)
+    r.raise_for_status()
+
+
+def test_push(cfg: dict) -> None:
+    if not cfg["push"]:
+        raise SystemExit("No usable push targets in config.json - see docs/CONFIGURATION.md (push).")
+    failed = False
+    for label, err in send_push("Alex Example is in the call", "Test meeting", "https://meet.google.com", cfg):
+        print(f"{label}: {'OK' if err is None else err}")
+        failed |= err is not None
+    if failed:
+        raise SystemExit(1)
 
 
 # ---------------------------------------------------------------- main loop
@@ -474,6 +617,7 @@ def main() -> None:
     ap.add_argument("--auth", action="store_true", help="run Google sign-in and exit")
     ap.add_argument("--once", action="store_true", help="poll once with debug logging and exit")
     ap.add_argument("--test-notify", action="store_true", help="send a test notification and exit")
+    ap.add_argument("--test-push", action="store_true", help="send a test phone notification (ntfy / Gotify) and exit")
     ap.add_argument("--tomorrow", action="store_true", help="list tomorrow's meetings and whether each can be watched")
     ap.add_argument("--meet-login", action="store_true", help="sign in to Google in the waiting-screen browser")
     ap.add_argument("--meet-peek", metavar="URL", help="show what the Meet waiting screen reports for one meeting")
@@ -487,7 +631,11 @@ def main() -> None:
     cfg = load_config()
 
     if args.test_notify:
-        notify("Alex Example has joined", "Test meeting", "https://meet.google.com", cfg)
+        notify("Alex Example has joined", "Test meeting", "https://meet.google.com", {**cfg, "push": []})
+        return
+
+    if args.test_push:
+        test_push(cfg)
         return
 
     if args.meet_login:
@@ -509,12 +657,14 @@ def main() -> None:
 
     watcher = Watcher(cfg, gs)
     if args.once:
+        print(f"Phone push targets: {', '.join(push_label(t) for t in cfg['push']) or 'none'}")
         events = current_events(gs, cfg)
         for ev in events:
             print(f"- {ev.get('summary')!r}: {find_meeting(ev)}")
         if not events:
             print("No meetings in the current window.")
         watcher.tick()
+        wait_for_pushes()
         return
 
     log.info("Watching calendars %s every %ss", cfg["calendar_ids"], cfg["poll_seconds"])
