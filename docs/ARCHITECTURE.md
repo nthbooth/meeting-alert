@@ -144,6 +144,24 @@ the 1-minute start reminder, with a Join button that opens the Teams link from t
 
 The alert sound comes from `/System/Library/Sounds/<sound>.aiff`.
 
+### Phone notifications
+
+If `push` has targets, `notify()` also starts `push_if_away()` in a daemon thread, so a slow or
+unreachable push server never delays polling or the Mac alert. One-shot commands (`--once`) call
+`wait_for_pushes()` before exiting so the thread isn't cut off.
+
+- `push_if_away()` checks `push_only_when_idle_seconds` against the Mac's input idle time
+  (`HIDIdleTime` from `ioreg -c IOHIDSystem`), then calls `send_push()`.
+- `send_push()` posts to each target with a 10-second timeout, logs a one-line result per target, and
+  never raises.
+- **ntfy:** JSON published to the server root (`{"topic", "title", "message", "priority", "click",
+  "actions"}`), not the `Title:`/`Click:` headers, because HTTP headers can't carry non-ASCII names.
+- **Gotify:** `POST <server>/message` with the token in `X-Gotify-Key` (never in the URL, so it can't
+  reach logs). `extras.client::notification.click.url` makes a tap open the meeting.
+- `valid_push_targets()` runs at config load and drops unusable entries with a warning.
+- Log lines name a target by `push_label()`: the Gotify host, or the first 6 characters of the ntfy
+  topic, since on ntfy.sh the topic works like a password.
+
 ## State and files on disk
 
 | File | Written by | Purpose |
@@ -161,7 +179,10 @@ repeated waiting-screen log lines.
 
 - Google API access is read-only: `calendar.readonly`.
 - The waiting-screen Chrome profile is a full Google session with unencrypted cookies.
-- Nothing is sent anywhere except Google, Zoom and (for alerts) macOS itself.
+- Nothing is sent anywhere except Google, Zoom and (for alerts) macOS itself, unless you set `push`:
+  then each alert's title, meeting title, attendee names and meeting link go to your ntfy or Gotify
+  server. On public ntfy.sh, anyone who knows the topic name can read them.
+- Push tokens and ntfy topics live in `config.json`, which is git-ignored.
 
 ## Extending it
 
@@ -170,4 +191,5 @@ repeated waiting-screen log lines.
   the kind to the `remind()` call in `tick()` for start reminders only.
 - **Another calendar:** add its ID (from Google Calendar settings) to `calendar_ids`.
 - **Different alert behaviour:** everything goes through `notify()`, so that's the one place to
-  change (for example to post to Slack instead).
+  change. For another push service, add a `push_<service>()` function, its required keys to
+  `PUSH_REQUIRED`, and a branch in `send_push()`.

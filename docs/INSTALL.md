@@ -140,6 +140,38 @@ Only meetings hosted on **your** Zoom account can be seen. Other people's Zoom m
    `zoom` block of `config.json`.
 4. Restart: `./install.sh`.
 
+## 8. Optional: phone notifications (ntfy or Gotify)
+
+Get each alert on your phone as well, with a tap that opens the meeting. Set up either or both.
+
+**ntfy** (iPhone or Android, free, nothing to host):
+
+1. Install the **ntfy** app from the App Store or Play Store.
+2. Choose a long random topic name: `echo mja-$(openssl rand -hex 12)`. Anyone who knows it can read
+   your alerts, so don't use something guessable.
+3. In the app, tap **+** and subscribe to that topic on `ntfy.sh`.
+4. Add `"push": [{"service": "ntfy", "topic": "<your topic>"}]` to `config.json`.
+
+**Gotify** (Android only, you run the server):
+
+1. Run a Gotify server ([gotify.net](https://gotify.net/docs/install)) that your phone can reach.
+2. In its web UI: **Apps → Create application** and copy the app's token.
+3. Install the **Gotify** Android app and log in to your server.
+4. Add `{"service": "gotify", "server": "https://<your server>", "token": "<app token>"}` to `push`.
+
+Then test and restart:
+
+```sh
+.venv/bin/python meeting_join_alert.py --test-push   # prints OK or the error for each target
+./install.sh
+```
+
+To be alerted on the phone only when you're away from the Mac, also set
+`"push_only_when_idle_seconds": 120`. See [CONFIGURATION.md](CONFIGURATION.md#phone-notifications-push).
+
+> **Privacy:** phone notifications send meeting titles and attendee names to the ntfy or Gotify
+> server. Use your own server or a private topic if that matters for your meetings.
+
 ---
 
 ## Day-to-day commands
@@ -152,6 +184,7 @@ Only meetings hosted on **your** Zoom account can be seen. Other people's Zoom m
 | See what's happening | `tail -f watcher.log` |
 | Is it running? | `launchctl print gui/$(id -u)/com.$(whoami).meeting-join-alert \| grep state` |
 | Preview tomorrow | `.venv/bin/python meeting_join_alert.py --tomorrow` |
+| Test phone notifications | `.venv/bin/python meeting_join_alert.py --test-push` |
 
 ## Updating
 
@@ -168,7 +201,7 @@ These files are **personal secrets**. Never copy them to someone else or commit 
 | --- | --- |
 | `google_token.json` | Your Google sign-in (calendar access) |
 | `meet_profile/` | Signed-in Chrome profile with unencrypted cookies (step 6) |
-| `config.json` | May hold your Zoom client secret |
+| `config.json` | May hold your Zoom client secret, ntfy topic/token and Gotify token |
 | `client_secret.json` | Your OAuth client; shareable inside your company but not publicly |
 | `alerted.json`, `watcher.log` | Your meeting titles and history |
 

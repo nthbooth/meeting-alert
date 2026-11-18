@@ -10,5 +10,7 @@
   "alert_timeout_seconds": 300,
   "google_client_secret": "client_secret.json",
   "meet_profile_dir": "meet_profile",
-  "zoom": null
+  "zoom": null,
+  "push": [],
+  "push_only_when_idle_seconds": 0
 }

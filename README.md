@@ -7,7 +7,8 @@ A small macOS background tool that watches your Google Calendar and pops up an a
 - **one minute before a Zoom or Teams meeting starts**, for meetings where there's no way to see
   who's in them.
 
-It stops alerting for a meeting once you're in it, and alerts only once per meeting.
+It stops alerting for a meeting once you're in it, and alerts only once per meeting. It can also send
+each alert to your phone via **ntfy** or **Gotify** (install step 8).
 
 ## Quick start
 
@@ -41,6 +42,7 @@ Every alert has a **Join** button that opens the meeting link from the invite.
 meeting_join_alert.py                  run forever (what the background service runs)
 meeting_join_alert.py --auth           one-off Google sign-in
 meeting_join_alert.py --test-notify    show a test alert
+meeting_join_alert.py --test-push      send a test phone notification (ntfy / Gotify)
 meeting_join_alert.py --once           one check of meetings starting soon, with debug output
 meeting_join_alert.py --tomorrow       list tomorrow's meetings and what each will get
 meeting_join_alert.py --meet-login     sign in to Google in the waiting-screen Chrome
@@ -75,4 +77,5 @@ Run the Python commands with `.venv/bin/python` from this folder.
 ## Requirements
 
 macOS, Python 3.10+, a Google account. Optional: Google Chrome (waiting screen),
-`terminal-notifier` (clickable banners), a Zoom Server-to-Server OAuth app.
+`terminal-notifier` (clickable banners), a Zoom Server-to-Server OAuth app, the ntfy app or a Gotify
+server (phone notifications).
