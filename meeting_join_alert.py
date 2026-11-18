@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
-from google.auth.exceptions import TransportError
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import AuthorizedSession, Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -90,6 +90,49 @@ def load_config() -> dict:
     return cfg
 
 
+def load_google_creds() -> Credentials | None:
+    """Saved calendar credentials, refreshed if needed. None if there are none or they no longer work
+    (expired or revoked). Network problems raise, so a blip isn't mistaken for a dead sign-in."""
+    if not TOKEN_PATH.exists():
+        return None
+    try:
+        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+    except (ValueError, KeyError):
+        log.warning("%s is unreadable - sign in again", TOKEN_PATH.name)
+        return None
+    if creds.valid:
+        return creds
+    if not creds.refresh_token:
+        return None
+    try:
+        creds.refresh(Request())
+    except RefreshError as e:
+        if getattr(e, "retryable", False):
+            raise
+        log.debug("Google token refresh failed: %s", e)
+        return None
+    return creds
+
+
+def save_google_creds(creds: Credentials) -> None:
+    # Write-then-rename so the running watcher never reads a half-written file.
+    tmp = TOKEN_PATH.with_suffix(".tmp")
+    tmp.write_text(creds.to_json())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, TOKEN_PATH)
+
+
+def google_sign_in(cfg: dict, timeout: int | None = None) -> Credentials:
+    """Browser-based Google sign-in for calendar access. Saves and returns the new credentials."""
+    flow = InstalledAppFlow.from_client_secrets_file(str(HERE / cfg["google_client_secret"]), SCOPES)
+    creds = flow.run_local_server(port=0, timeout_seconds=timeout, authorization_prompt_message="",
+                                  success_message="Signed in. You can close this tab - meeting alerts are back on.")
+    if not creds:
+        raise RuntimeError("sign-in didn't complete")
+    save_google_creds(creds)
+    return creds
+
+
 def waiting_screen(cfg: dict) -> meet_waiting_screen.WaitingScreen | None:
     """The waiting-screen reader, if you've signed in with --meet-login."""
     screen = meet_waiting_screen.WaitingScreen(HERE / cfg["meet_profile_dir"])
@@ -100,18 +143,15 @@ def waiting_screen(cfg: dict) -> meet_waiting_screen.WaitingScreen | None:
 
 
 def google_session(cfg: dict, interactive: bool = False) -> AuthorizedSession:
-    creds = None
-    if TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
-    if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    if not creds or not creds.valid:
+    """Calendar session for one-off commands. --auth (or a terminal) signs in if the saved one doesn't work."""
+    creds = None if interactive else load_google_creds()
+    if not creds:
         if not (interactive or sys.stdin.isatty()):
-            raise SystemExit("No valid Google token - run `meeting_join_alert.py --auth` in a terminal first.")
-        flow = InstalledAppFlow.from_client_secrets_file(str(HERE / cfg["google_client_secret"]), SCOPES)
-        creds = flow.run_local_server(port=0)
-    TOKEN_PATH.write_text(creds.to_json())
-    os.chmod(TOKEN_PATH, 0o600)
+            raise SystemExit("Google sign-in missing or expired - run `meeting_join_alert.py --auth` in a terminal.")
+        secret = HERE / cfg["google_client_secret"]
+        if not secret.exists():
+            raise SystemExit(f"{secret.name} not found - see docs/INSTALL.md step 3.")
+        creds = google_sign_in(cfg)
     return AuthorizedSession(creds)
 
 
@@ -237,6 +277,10 @@ def notify(title: str, message: str, url: str | None, cfg: dict) -> None:
         show_banner(title, message, url, cfg["sound"])
     if style in ("alert", "both"):
         show_alert(title, message, url, cfg, play_sound=(style == "alert"))
+    push_async(title, message, url, cfg)
+
+
+def push_async(title: str, message: str, url: str | None, cfg: dict) -> None:
     if cfg.get("push"):
         # In a thread so a slow push server never holds up polling or the Mac alert.
         th = threading.Thread(target=push_if_away, args=(title, message, url, cfg), daemon=True)
@@ -412,14 +456,181 @@ def test_push(cfg: dict) -> None:
         raise SystemExit(1)
 
 
+# ---------------------------------------------------------------- sign-ins
+
+class SignIn:
+    """A sign-in the watcher depends on. When it stops working: one log line, an alert on the Mac with a
+    Sign in button (repeated every few hours while it stays broken) and one phone push. When it works
+    again: a "back on" notification."""
+
+    what = ""                  # e.g. "Google Calendar sign-in"
+    effect = ""                # what stops while it's broken
+    REMIND_SECONDS = 2 * 3600
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.problem: str | None = None
+        self.asked_at = 0.0
+        self.pushed = False
+        self.busy = threading.Event()  # an alert is on screen or sign-in is in progress
+
+    def instructions(self) -> str:
+        return ""
+
+    def blocker(self) -> str | None:
+        """Why the Sign in button can't work, if it can't."""
+        return None
+
+    def sign_in(self) -> None:
+        raise NotImplementedError
+
+    def pause(self, problem: str) -> None:
+        if self.problem is None:
+            log.warning("%s %s - %s until you sign in again", self.what, problem, self.effect)
+            self.asked_at, self.pushed = 0.0, False
+        self.problem = problem
+        self.ask_if_due()
+
+    def resume(self, note: str = "") -> None:
+        if self.problem is None:
+            return
+        log.info("%s working again%s", self.what, f" ({note})" if note else "")
+        self.problem = None
+        notify(f"{self.what} is working again", f"Meeting alerts are back on. {note}".strip(), None,
+               {**self.cfg, "style": "banner"})
+
+    def ask_if_due(self) -> None:
+        if self.problem is None or self.busy.is_set() or time.time() - self.asked_at < self.REMIND_SECONDS:
+            return
+        self.asked_at = time.time()
+        title = f"Meeting alerts paused: {self.what} {self.problem}"
+        if not self.pushed:
+            self.pushed = True
+            push_async(title, f"{self.effect.capitalize()}. Sign in again on your Mac.", None, self.cfg)
+        self.busy.set()
+        threading.Thread(target=self._ask, args=(title,), daemon=True).start()
+
+    def _ask(self, title: str) -> None:
+        try:
+            blocker = self.blocker()
+            message = f"{self.effect.capitalize()}.\n\n" + (blocker or self.instructions())
+            buttons = '{"OK"} default button "OK"' if blocker else '{"Later", "Sign in"} default button "Sign in"'
+            sound = Path(f"/System/Library/Sounds/{self.cfg['sound']}.aiff")
+            if sound.exists():
+                subprocess.Popen(["afplay", str(sound)])
+            r = subprocess.run(
+                ["osascript", "-e", "on run argv", "-e", "activate",
+                 "-e", f"set r to display alert (item 1 of argv) message (item 2 of argv) as critical "
+                       f"buttons {buttons} giving up after 3600",
+                 "-e", "return button returned of r", "-e", "end run", title, message],
+                capture_output=True, text=True)
+            if r.stdout.strip() != "Sign in":
+                return
+            log.info("Signing in again: %s", self.what)
+            try:
+                self.sign_in()
+            except Exception as e:  # anything from the browser flow: try again on the next poll
+                log.warning("%s didn't complete: %s", self.what, e)
+                self.asked_at = 0.0
+        finally:
+            self.busy.clear()
+
+
+class CalendarSignIn(SignIn):
+    """Calendar access for the long-running watcher. Never exits: pauses and asks you to sign in again.
+    Picks up a new google_token.json - from the Sign in button or --auth - without a restart."""
+
+    what = "Google Calendar sign-in"
+    effect = "no meeting alerts of any kind"
+
+    def __init__(self, cfg: dict):
+        super().__init__(cfg)
+        self.gs: AuthorizedSession | None = None
+        self.loaded_mtime: float | None = -1.0  # -1 = not loaded yet
+
+    def instructions(self) -> str:
+        return "Click Sign in: a browser tab opens, pick your Google account and allow calendar access."
+
+    def blocker(self) -> str | None:
+        secret = HERE / self.cfg["google_client_secret"]
+        if not secret.exists():
+            return (f"{secret.name} is missing from {HERE}, so sign-in can't run. Get it again (docs/INSTALL.md "
+                    f"step 3), then run: .venv/bin/python meeting_join_alert.py --auth")
+        return None
+
+    def sign_in(self) -> None:
+        google_sign_in(self.cfg, timeout=600)  # the poll loop notices the new token file
+
+    def session(self) -> AuthorizedSession | None:
+        """The calendar session, or None while signed out."""
+        mtime = TOKEN_PATH.stat().st_mtime if TOKEN_PATH.exists() else None
+        if mtime != self.loaded_mtime:  # first run, or a new token was saved
+            creds = load_google_creds()  # network errors propagate; we retry next poll
+            self.loaded_mtime = mtime
+            if creds:
+                self.gs = AuthorizedSession(creds)
+                self.resume()
+            else:
+                self.gs = None
+                self.pause("is missing" if mtime is None else "has expired")
+        if self.gs is None:
+            self.ask_if_due()
+        return self.gs
+
+    def failed(self, e: RefreshError) -> None:
+        """The token stopped working mid-run (expired or revoked)."""
+        log.debug("Google token refresh failed: %s", e)
+        self.gs = None
+        self.pause("has expired")
+
+
+class MeetSignIn(SignIn):
+    """The Google session in the waiting-screen Chrome profile."""
+
+    what = "Meet waiting-screen sign-in"
+    effect = "no join alerts for Google Meet meetings (Zoom and Teams alerts still work)"
+
+    def __init__(self, cfg: dict, screen: meet_waiting_screen.WaitingScreen):
+        super().__init__(cfg)
+        self.screen = screen
+        self.done_signing_in = threading.Event()
+
+    def instructions(self) -> str:
+        return ("Click Sign in: a separate Chrome window opens. Sign in to Google there, then quit that Chrome "
+                "with Cmd-Q.")
+
+    def sign_in(self) -> None:
+        meet_waiting_screen.open_sign_in_window(self.screen.profile_dir)
+        self.done_signing_in.set()
+
+    def usable(self) -> bool:
+        """Whether Meet meetings can be watched right now. Call from the poll loop (Playwright's thread)."""
+        if self.done_signing_in.is_set():
+            self.done_signing_in.clear()
+            if self.screen.signed_in:
+                self.resume("Watching Google Meet meetings again.")
+        if self.problem is None and not self.screen.signed_in:
+            self.pause("is missing")
+        if self.problem is not None:
+            self.ask_if_due()
+            return False
+        return True
+
+    def signed_out(self) -> None:
+        """Meet redirected to Google sign-in: the session has expired."""
+        self.screen.shutdown()  # free the profile for the sign-in window
+        self.pause("has expired")
+
+
 # ---------------------------------------------------------------- main loop
 
 class Watcher:
-    def __init__(self, cfg: dict, gs: AuthorizedSession):
+    def __init__(self, cfg: dict, calendar: CalendarSignIn):
         self.cfg = cfg
-        self.gs = gs
+        self.calendar = calendar
         self.zoom = Zoom(cfg["zoom"]) if cfg.get("zoom") else None
-        self.screen = waiting_screen(cfg)
+        self.screen = meet_waiting_screen.WaitingScreen(HERE / cfg["meet_profile_dir"])
+        self.meet = MeetSignIn(cfg, self.screen)
         self.state: dict[str, dict] = {}
         self.alerted: dict[str, float] = {}
         if ALERTED_PATH.exists():
@@ -433,8 +644,19 @@ class Watcher:
         return name.strip().lower() in self.cfg["my_names"]
 
     def tick(self) -> None:
+        gs = self.calendar.session()
+        if gs is None:
+            return
+        try:
+            events = current_events(gs, self.cfg)
+        except RefreshError as e:
+            if getattr(e, "retryable", False):
+                raise
+            self.calendar.failed(e)
+            return
         live_keys = set()
-        for ev in current_events(self.gs, self.cfg):
+        meet_ok = None  # checked once per poll, only if there's a Meet meeting
+        for ev in events:
             meeting = find_meeting(ev)
             if not meeting:
                 continue
@@ -450,24 +672,27 @@ class Watcher:
             if not st["done"] and datetime.now(timezone.utc) > cutoff:
                 log.info("Stopped watching '%s': nobody else joined by %s", title, cutoff.astimezone().strftime("%H:%M"))
                 st["done"] = True
-                if self.screen:
-                    self.screen.close(key)
+                self.screen.close(key)
             if kind in ("zoom", "teams"):
                 self.remind(ev, key, kind, url, title)
             if st["done"]:
                 continue
+            if kind == "meet":
+                if meet_ok is None:
+                    meet_ok = self.meet.usable()
+                if not meet_ok:
+                    continue  # keep the meeting pending, so it's watched once you're signed in again
             try:
                 self.check(ev, key, kind, mid, url, title, st)
             except NotAvailable as e:
                 log.info("Can't watch '%s' (%s): %s", title, kind, e)
                 st["done"] = True
-            if st["done"] and self.screen:
+            if st["done"]:
                 self.screen.close(key)
         # forget events that have ended
         for key in set(self.state) - live_keys:
             del self.state[key]
-            if self.screen:
-                self.screen.close(key)
+            self.screen.close(key)
 
     def remind(self, ev: dict, key: str, kind: str, url: str | None, title: str) -> None:
         """Alert shortly before a Zoom/Teams meeting starts, once. Skipped if we only notice it well after the start."""
@@ -485,8 +710,6 @@ class Watcher:
         ALERTED_PATH.write_text(json.dumps(self.alerted))
 
     def check_waiting_screen(self, key: str, url: str, title: str, st: dict) -> None:
-        if not self.screen:
-            raise NotAvailable("waiting screen not set up - run --meet-login")
         from playwright.sync_api import Error as PlaywrightError
 
         try:
@@ -499,7 +722,8 @@ class Watcher:
             return  # still loading
         log.debug("waiting screen '%s': %s", title, r)
         if r.status == "signed_out":
-            raise NotAvailable("the Meet browser is signed out - run --meet-login")
+            self.meet.signed_out()
+            return
         if r.status == "blocked":
             raise NotAvailable(f"Meet says '{r.detail}'")
         if r.status == "no_info":
@@ -628,6 +852,8 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    # The sign-in helper logs the sign-in URL and the one-time auth code: keep them out of watcher.log.
+    logging.getLogger("google_auth_oauthlib").setLevel(logging.WARNING)
     cfg = load_config()
 
     if args.test_notify:
@@ -646,17 +872,19 @@ def main() -> None:
         peek(cfg, args.meet_peek)
         return
 
-    gs = google_session(cfg, interactive=args.auth)
     if args.auth:
-        print(f"Signed in. Token saved to {TOKEN_PATH}")
+        google_session(cfg, interactive=True)
+        print(f"Signed in. Token saved to {TOKEN_PATH}. A running watcher picks it up within one poll.")
         return
 
     if args.tomorrow:
-        list_tomorrow(gs, cfg)
+        list_tomorrow(google_session(cfg), cfg)
         return
 
-    watcher = Watcher(cfg, gs)
+    # The service never exits over sign-in problems: it pauses, alerts and waits for a new token.
+    watcher = Watcher(cfg, CalendarSignIn(cfg))
     if args.once:
+        gs = google_session(cfg)
         print(f"Phone push targets: {', '.join(push_label(t) for t in cfg['push']) or 'none'}")
         events = current_events(gs, cfg)
         for ev in events:
